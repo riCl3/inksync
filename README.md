@@ -2,7 +2,7 @@
 
 **Offline-first personal notes for Android.** Your notes remain usable even when the internet doesn't.
 
-> Status: **Milestone 1 complete** — project skeleton, navigation, architecture foundation.
+> Status: **Milestone 2 complete** — Room is the local source of truth; notes survive process death.
 
 ## Why offline-first
 
@@ -38,16 +38,22 @@ flowchart TD
 - Synchronization is persistent work (WorkManager), not a coroutine — it survives process death.
 - Failures are classified: transient errors retry with backoff, permanent errors surface in the UI.
 
-## Current milestone (M1)
+## Milestones completed
 
-- Gradle + version catalog, Kotlin 2.0, Compose, Material 3, Hilt
-- Adaptive shell: bottom navigation on phones, navigation rail on tablets/wide screens
-- Minimal "ink on paper" theme: near-monochrome, color reserved for sync state
-- Screens: Notes home, write-through editor, offline search, folders, settings, sync status
-- `NotesRepository` interface with an in-memory implementation (swapped for Room in M2)
-- Unit tests for ViewModel aggregation logic (5 passing)
+**M1 — Skeleton:** Gradle + version catalog, Kotlin 2.0, Compose, Material 3, Hilt;
+adaptive shell (bottom bar on phones, navigation rail on wide screens); minimal "ink on
+paper" theme with color reserved for sync state; screens: notes home, write-through
+editor, offline search, folders shell, settings, sync status; repository interface with
+an in-memory stand-in; 5 ViewModel unit tests.
 
-Verified on emulator: create → edit → persist → search, all offline.
+**M2 — Room as source of truth:** `notes`/`folders` tables (client-generated UUID PK,
+`version`, `syncState`, `deletedAt` from day one), DAOs with reactive `Flow` queries,
+entity↔domain mapping at the repository boundary, `exportSchema` for future migration
+tests; 12 instrumented tests (CRUD, version bumping, idempotent pin, idempotent-when-
+same-value updates, DB reopen durability).
+
+Verified on emulator: create → edit → search offline, **force-stop → relaunch → note
+still there** (screenshots in `docs/screenshots/`).
 
 ## Project structure
 
@@ -56,8 +62,10 @@ app/src/main/java/com/inc/app/
 ├── IncSyncApp.kt          # Hilt application
 ├── MainActivity.kt        # single activity, theme + adaptive root
 ├── domain/                # models + repository interface (no framework deps)
-├── data/                  # in-memory source of truth (Room in M2)
-├── di/                    # Hilt bindings
+├── data/
+│   ├── local/             # Room entities, DAOs, database (source of truth)
+│   └── repository/        # Room-backed repository (entity ↔ domain boundary)
+├── di/                    # Hilt bindings (data + Room modules)
 └── ui/
     ├── navigation/        # routes + NavHost
     ├── notes/             # home + editor
@@ -72,9 +80,10 @@ app/src/main/java/com/inc/app/
 ## Build & run
 
 ```bash
-./gradlew :app:assembleDebug        # build APK
-./gradlew :app:testDebugUnitTest    # unit tests
-./gradlew :app:installDebug         # install on connected device/emulator
+./gradlew :app:assembleDebug            # build APK
+./gradlew :app:testDebugUnitTest        # unit tests
+./gradlew :app:connectedDebugAndroidTest  # instrumented tests (device/emulator required)
+./gradlew :app:installDebug             # install on connected device/emulator
 ```
 
 Requires JDK 17 and the Android SDK (compileSdk 35, minSdk 26).
@@ -83,7 +92,7 @@ Requires JDK 17 and the Android SDK (compileSdk 35, minSdk 26).
 
 | Milestone | Scope |
 |---|---|
-| 2 | Room as the local source of truth |
+| 2 | Room as the local source of truth | ✅ |
 | 3 | Auth + FastAPI/PostgreSQL backend |
 | 4–6 | Remote sync, offline write queue, WorkManager |
 | 7–9 | Idempotency, retries, multi-device conflict detection & resolution |
