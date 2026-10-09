@@ -1,0 +1,31 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: incsync
+      POSTGRES_PASSWORD: incsync
+      POSTGRES_DB: incsync
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U incsync -d incsync"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://incsync:incsync@db:5432/incsync
+      # Local-dev default only; production must supply JWT_SECRET via env
+      # (the app refuses to start otherwise). See .env.example.
+      JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-change-me}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

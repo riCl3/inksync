@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- INTERNET is deliberately absent in Milestone 1; added in Milestone 3 with the backend. -->
+    <!-- Required for synchronization with the backend (Milestone 3+). -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:name=".IncSyncApp"
         android:allowBackup="false"
+        android:usesCleartextTraffic="${usesCleartextTraffic}"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"

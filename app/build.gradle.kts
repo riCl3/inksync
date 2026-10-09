@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
 }
@@ -23,6 +24,9 @@ android {
     buildTypes {
         release {
             // Signing is configured in Milestone 12; keep secrets out of Git.
+            // API_BASE_URL must point at the HTTPS production deployment.
+            buildConfigField("String", "API_BASE_URL", "\"https://api.example.com\"")
+            manifestPlaceholders["usesCleartextTraffic"] = "false"
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -32,6 +36,10 @@ android {
         }
         debug {
             applicationIdSuffix = ".debug"
+            // Emulator reaches the host machine via 10.0.2.2; cleartext is
+            // allowed ONLY in debug (local dev backend). Production is HTTPS.
+            buildConfigField("String", "API_BASE_URL", "\"http://10.0.2.2:8000\"")
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
         }
     }
 
@@ -84,6 +92,11 @@ dependencies {
     implementation(libs.androidx.hilt.navigation.compose)
 
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.serialization.json)
+
+    implementation(libs.retrofit)
+    implementation(libs.retrofit.kotlinx.serialization)
+    implementation(libs.okhttp)
 
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
