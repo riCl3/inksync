@@ -49,6 +49,9 @@ data class FolderEntity(
     val name: String,
     val createdAt: Long,
     val updatedAt: Long,
+    val version: Int = 1,
+    val syncState: String = "PENDING",
+    val syncedVersion: Int = 0,
 )
 
 fun NoteEntity.toDomain() = Note(

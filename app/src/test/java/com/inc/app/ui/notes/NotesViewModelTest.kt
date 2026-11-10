@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -151,6 +152,13 @@ class NotesViewModelTest {
 
         override fun observeNotes(): Flow<List<Note>> = state
         override fun observeFolders(): Flow<List<Folder>> = MutableStateFlow(emptyList())
+        override fun searchNotes(query: String): Flow<List<Note>> = state.map { list ->
+            list.filter { it.title.contains(query, ignoreCase = true) || it.content.contains(query, ignoreCase = true) }
+        }
+
+        override suspend fun createFolder(name: String): String = "f"
+        override suspend fun renameFolder(id: String, name: String) = Unit
+        override suspend fun deleteFolder(id: String) = Unit
         override suspend fun getNote(id: String): Note? = state.value.firstOrNull { it.id == id }
 
         override suspend fun createNote(title: String, content: String, folderId: String?): String {
@@ -168,6 +176,9 @@ class NotesViewModelTest {
         override suspend fun deleteNote(id: String) {
             state.update { list -> list.filterNot { it.id == id } }
         }
+
+        override suspend fun resolveConflictKeepLocal(id: String) = Unit
+        override suspend fun resolveConflictKeepServer(id: String) = Unit
 
         fun seed(vararg notes: Note) {
             state.value = notes.toList()

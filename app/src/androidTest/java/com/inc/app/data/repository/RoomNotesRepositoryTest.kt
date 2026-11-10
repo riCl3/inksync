@@ -38,7 +38,7 @@ class RoomNotesRepositoryTest {
         context = InstrumentationRegistry.getInstrumentation().targetContext
         context.deleteDatabase(dbName)
         db = openDb()
-        repository = RoomNotesRepository(db.noteDao(), db.folderDao(), db.pendingOpDao(), com.inc.app.data.remote.TokenStore(context), db, com.inc.app.data.sync.SyncScheduler(context))
+        repository = RoomNotesRepository(db.noteDao(), FakeIncSyncApi, db.noteFtsDao(), db.folderDao(), db.pendingOpDao(), com.inc.app.data.remote.TokenStore(context), db, com.inc.app.data.sync.SyncScheduler(context))
     }
 
     @After
@@ -92,7 +92,7 @@ class RoomNotesRepositoryTest {
 
         // …and start fresh, exactly as a relaunched app would.
         db = openDb()
-        repository = RoomNotesRepository(db.noteDao(), db.folderDao(), db.pendingOpDao(), com.inc.app.data.remote.TokenStore(context), db, com.inc.app.data.sync.SyncScheduler(context))
+        repository = RoomNotesRepository(db.noteDao(), FakeIncSyncApi, db.noteFtsDao(), db.folderDao(), db.pendingOpDao(), com.inc.app.data.remote.TokenStore(context), db, com.inc.app.data.sync.SyncScheduler(context))
 
         val note = repository.getNote(id)
         assertEquals("Durable v2", note?.title)

@@ -17,12 +17,14 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.outlined.PushPin
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
@@ -169,6 +171,20 @@ fun NoteEditorScreen(
 
             EditorFooter(state)
         }
+    }
+
+    if (state.isConflict) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Conflict detected") },
+            text = { Text("This note changed on another device. Keep your version or load the server version?") },
+            confirmButton = {
+                TextButton(onClick = viewModel::resolveKeepLocal) { Text("Keep mine") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::resolveKeepServer) { Text("Use server") }
+            },
+        )
     }
 }
 

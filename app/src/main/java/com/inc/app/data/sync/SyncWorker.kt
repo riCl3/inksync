@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.inc.app.data.local.FolderDao
 import com.inc.app.data.local.NoteDao
 import com.inc.app.data.local.PendingOpDao
 import com.inc.app.data.remote.IncSyncApi
@@ -22,6 +23,7 @@ class SyncWorker @AssistedInject constructor(
     @Assisted appContext: Context,
     @Assisted params: WorkerParameters,
     private val noteDao: NoteDao,
+    private val folderDao: FolderDao,
     private val pendingOpDao: PendingOpDao,
     private val api: IncSyncApi,
     private val tokenStore: TokenStore,
@@ -43,6 +45,9 @@ class SyncWorker @AssistedInject constructor(
                     "CREATE" -> handleCreate(op)
                     "UPDATE" -> handleUpdate(op)
                     "DELETE" -> handleDelete(op)
+                    "FOLDER_CREATE" -> handleFolderCreate(op)
+                    "FOLDER_RENAME" -> handleFolderRename(op)
+                    "FOLDER_DELETE" -> handleFolderDelete(op)
                 }
             } catch (e: IOException) {
                 // Transient: retry with backoff.
@@ -160,5 +165,68 @@ class SyncWorker @AssistedInject constructor(
         } catch (e: Exception) {
             null
         }
+    }
+
+    private suspend fun handleFolderCreate(op: com.inc.app.data.local.PendingOpEntity) {
+        val folder = folderDao.getById(op.noteId)
+        if (folder == null) {
+            pendingOpDao.delete(op.id)
+            return
+        }
+        val res = api.createFolder(com.inc.app.data.remote.FolderCreate(id = folder.id, name = folder.name))
+        if (res.isSuccessful) {
+            val server = res.body()!!
+            folderDao.updateSyncState(folder.id, com.inc.app.domain.model.SyncState.SYNCED.name, server.version, server.version)
+            pendingOpDao.delete(op.id)
+        } else if (res.code() in 500..599) {
+            throw retrofit2.HttpException(res)
+        } else {
+            markFolderFailed(op, "HTTP ${res.code()}")
+        }
+    }
+
+    private suspend fun handleFolderRename(op: com.inc.app.data.local.PendingOpEntity) {
+        val folder = folderDao.getById(op.noteId)
+        if (folder == null) {
+            pendingOpDao.delete(op.id)
+            return
+        }
+        if (folder.syncedVersion == 0) return
+        val res = api.updateFolder(
+            folder.id,
+            com.inc.app.data.remote.FolderUpdate(name = folder.name, baseVersion = folder.syncedVersion),
+        )
+        if (res.isSuccessful) {
+            val server = res.body()!!
+            folderDao.updateSyncState(folder.id, com.inc.app.domain.model.SyncState.SYNCED.name, server.version, server.version)
+            pendingOpDao.delete(op.id)
+        } else if (res.code() == 409) {
+            val serverVersion = parseConflictVersion(res.errorBody()?.string())
+            folderDao.updateSyncState(folder.id, com.inc.app.domain.model.SyncState.CONFLICT.name, folder.version, serverVersion ?: folder.syncedVersion)
+            pendingOpDao.delete(op.id)
+        } else if (res.code() in 500..599) {
+            throw retrofit2.HttpException(res)
+        } else {
+            markFolderFailed(op, "HTTP ${res.code()}")
+        }
+    }
+
+    private suspend fun handleFolderDelete(op: com.inc.app.data.local.PendingOpEntity) {
+        val res = api.deleteFolder(op.noteId)
+        if (res.isSuccessful || res.code() == 404) {
+            pendingOpDao.delete(op.id)
+        } else if (res.code() in 500..599) {
+            throw retrofit2.HttpException(res)
+        } else {
+            markFolderFailed(op, "HTTP ${res.code()}")
+        }
+    }
+
+    private suspend fun markFolderFailed(op: com.inc.app.data.local.PendingOpEntity, error: String?) {
+        pendingOpDao.markFailed(op.id, error)
+        folderDao.getById(op.noteId)?.let { f ->
+            folderDao.updateSyncState(f.id, com.inc.app.domain.model.SyncState.FAILED.name, f.version, f.syncedVersion)
+        }
+        pendingOpDao.delete(op.id)
     }
 }

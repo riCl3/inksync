@@ -19,6 +19,9 @@ interface NotesRepository {
 
     fun observeFolders(): Flow<List<Folder>>
 
+    /** Reactive full-text search over local notes. */
+    fun searchNotes(query: String): Flow<List<Note>>
+
     suspend fun getNote(id: String): Note?
 
     /** Creates a note and returns its id. */
@@ -29,4 +32,16 @@ interface NotesRepository {
     suspend fun setPinned(id: String, pinned: Boolean)
 
     suspend fun deleteNote(id: String)
+
+    /** Resolve a sync conflict by keeping the local version (overwrite server). */
+    suspend fun resolveConflictKeepLocal(id: String)
+
+    /** Resolve a sync conflict by discarding local changes (load server version). */
+    suspend fun resolveConflictKeepServer(id: String)
+
+    suspend fun createFolder(name: String): String
+
+    suspend fun renameFolder(id: String, name: String)
+
+    suspend fun deleteFolder(id: String)
 }

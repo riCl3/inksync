@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+
 package com.inc.app.ui.search
 
 import androidx.lifecycle.ViewModel
@@ -9,7 +11,9 @@ import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
 data class SearchUiState(
@@ -18,19 +22,6 @@ data class SearchUiState(
     val hasSearched: Boolean = false,
 )
 
-/**
- * Offline search.
- *
- * Concept: search never touches the network. The query is combined with the
- * local note stream, so results update reactively as the user types AND are
- * correct even while other edits are happening elsewhere in the app.
- *
- * Milestone 1 filters in memory because the list fits in memory. From
- * Milestone 10 this same [SearchUiState] contract is fed by a Room FTS table —
- * the screen will not change, only the data source behind the repository.
- * (No debounce on the query: filtering is cheap at this scale, and debouncing
- * would make the text field itself lag behind the user's typing.)
- */
 @HiltViewModel
 class SearchViewModel @Inject constructor(
     private val repository: NotesRepository,
@@ -38,26 +29,14 @@ class SearchViewModel @Inject constructor(
 
     private val query = MutableStateFlow("")
 
-    val uiState: StateFlow<SearchUiState> = combine(
-        query,
-        repository.observeNotes(),
-    ) { q, notes ->
-        val filtered = if (q.isBlank()) {
-            emptyList()
+    val uiState: StateFlow<SearchUiState> = query.flatMapLatest { q ->
+        if (q.isBlank()) {
+            flowOf(SearchUiState(query = q, results = emptyList(), hasSearched = false))
         } else {
-            val needle = q.trim()
-            notes
-                .filter { note ->
-                    note.title.contains(needle, ignoreCase = true) ||
-                        note.content.contains(needle, ignoreCase = true)
-                }
-                .sortedByDescending { it.updatedAt }
+            repository.searchNotes(q).map { results ->
+                SearchUiState(query = q, results = results, hasSearched = true)
+            }
         }
-        SearchUiState(
-            query = q,
-            results = filtered,
-            hasSearched = q.isNotBlank(),
-        )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),

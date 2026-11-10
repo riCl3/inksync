@@ -79,11 +79,30 @@ interface FolderDao {
     @Query("SELECT * FROM folders ORDER BY name COLLATE NOCASE ASC")
     fun observeAll(): Flow<List<FolderEntity>>
 
+    @Query("SELECT * FROM folders WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): FolderEntity?
+
     @Upsert
     suspend fun upsert(folder: FolderEntity)
 
     @Query("DELETE FROM folders WHERE id = :id")
     suspend fun delete(id: String)
+
+    @Query(
+        """
+        UPDATE folders
+        SET syncState = :syncState, version = :version, syncedVersion = :syncedVersion
+        WHERE id = :id
+        """,
+    )
+    suspend fun updateSyncState(id: String, syncState: String, version: Int, syncedVersion: Int): Int
+}
+
+@Dao
+interface NoteFtsDao {
+
+    @Query("SELECT notes.* FROM notes JOIN notes_fts ON notes.rowid = notes_fts.rowid WHERE notes_fts MATCH :query AND notes.deletedAt IS NULL")
+    fun search(query: String): kotlinx.coroutines.flow.Flow<List<NoteEntity>>
 }
 
 @Dao

@@ -3,6 +3,7 @@ package com.inc.app.ui.notes
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.inc.app.domain.model.SyncState
 import com.inc.app.domain.repository.NotesRepository
 import com.inc.app.ui.navigation.Routes
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -25,6 +26,7 @@ data class EditorUiState(
     val isNew: Boolean = true,
     val notFound: Boolean = false,
     val updatedAt: Long? = null,
+    val isConflict: Boolean = false,
 )
 
 /**
@@ -70,6 +72,7 @@ class NoteEditorViewModel @Inject constructor(
                             isPinned = note.isPinned,
                             isNew = false,
                             updatedAt = note.updatedAt,
+                            isConflict = note.syncState == SyncState.CONFLICT,
                         )
                     }
                 }
@@ -97,6 +100,33 @@ class NoteEditorViewModel @Inject constructor(
     fun delete() {
         val id = persistedId ?: return
         viewModelScope.launch { repository.deleteNote(id) }
+    }
+
+    fun resolveKeepLocal() {
+        val id = persistedId ?: return
+        viewModelScope.launch {
+            repository.resolveConflictKeepLocal(id)
+            _uiState.update { it.copy(isConflict = false) }
+        }
+    }
+
+    fun resolveKeepServer() {
+        val id = persistedId ?: return
+        viewModelScope.launch {
+            repository.resolveConflictKeepServer(id)
+            val note = repository.getNote(id)
+            if (note != null) {
+                _uiState.update {
+                    it.copy(
+                        title = note.title,
+                        content = note.content,
+                        isPinned = note.isPinned,
+                        updatedAt = note.updatedAt,
+                        isConflict = false,
+                    )
+                }
+            }
+        }
     }
 
     /**

@@ -3,9 +3,12 @@ package com.inc.app.data.repository
 import com.inc.app.data.local.FolderDao
 import com.inc.app.data.local.NoteDao
 import com.inc.app.data.local.NoteEntity
+import com.inc.app.data.local.NoteFtsDao
+import com.inc.app.data.local.FolderEntity
 import com.inc.app.data.local.IncSyncDatabase
 import com.inc.app.data.local.PendingOpDao
 import com.inc.app.data.local.PendingOpEntity
+import com.inc.app.data.remote.IncSyncApi
 import com.inc.app.data.remote.TokenStore
 import com.inc.app.data.sync.SyncScheduler
 import com.inc.app.data.local.toDomain
@@ -18,6 +21,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import androidx.room.withTransaction
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.map
 
 /**
@@ -41,6 +45,8 @@ import kotlinx.coroutines.flow.map
 @Singleton
 class RoomNotesRepository @Inject constructor(
     private val noteDao: NoteDao,
+    private val api: IncSyncApi,
+    private val noteFtsDao: NoteFtsDao,
     private val folderDao: FolderDao,
     private val pendingOpDao: PendingOpDao,
     private val tokenStore: TokenStore,
@@ -56,6 +62,16 @@ class RoomNotesRepository @Inject constructor(
 
     override fun observeFolders(): Flow<List<Folder>> =
         folderDao.observeAll().map { entities -> entities.map { it.toDomain() } }
+
+    override fun searchNotes(query: String): Flow<List<Note>> =
+        if (query.isBlank()) kotlinx.coroutines.flow.flowOf(emptyList())
+        else kotlinx.coroutines.flow.flow {
+            try {
+                emitAll(noteFtsDao.search(query).map { entities -> entities.map { it.toDomain() } })
+            } catch (e: Exception) {
+                emit(emptyList())
+            }
+        }
 
     override suspend fun getNote(id: String): Note? =
         noteDao.getById(id)?.takeIf { it.deletedAt == null }?.toDomain()
@@ -118,5 +134,101 @@ class RoomNotesRepository @Inject constructor(
             )
         }
         syncScheduler.schedule()
+    }
+
+    override suspend fun createFolder(name: String): String {
+        val now = System.currentTimeMillis()
+        val id = UUID.randomUUID().toString()
+        db.withTransaction {
+            folderDao.upsert(
+                FolderEntity(
+                    id = id,
+                    userId = currentUserId,
+                    name = name,
+                    createdAt = now,
+                    updatedAt = now,
+                    version = 1,
+                    syncState = SyncState.PENDING.name,
+                    syncedVersion = 0,
+                ),
+            )
+            pendingOpDao.insert(
+                PendingOpEntity(opType = "FOLDER_CREATE", noteId = id, payload = null, createdAt = now),
+            )
+        }
+        syncScheduler.schedule()
+        return id
+    }
+
+    override suspend fun renameFolder(id: String, name: String) {
+        val now = System.currentTimeMillis()
+        db.withTransaction {
+            val existing = folderDao.getById(id) ?: return@withTransaction
+            folderDao.upsert(
+                existing.copy(
+                    name = name,
+                    updatedAt = now,
+                    version = existing.version + 1,
+                    syncState = SyncState.PENDING.name,
+                ),
+            )
+            pendingOpDao.insert(
+                PendingOpEntity(opType = "FOLDER_RENAME", noteId = id, payload = null, createdAt = now),
+            )
+        }
+        syncScheduler.schedule()
+    }
+
+    override suspend fun deleteFolder(id: String) {
+        val now = System.currentTimeMillis()
+        db.withTransaction {
+            folderDao.delete(id)
+            pendingOpDao.insert(
+                PendingOpEntity(opType = "FOLDER_DELETE", noteId = id, payload = null, createdAt = now),
+            )
+        }
+        syncScheduler.schedule()
+    }
+
+    override suspend fun resolveConflictKeepLocal(id: String) {
+        val now = System.currentTimeMillis()
+        db.withTransaction {
+            val note = noteDao.getById(id) ?: return@withTransaction
+            noteDao.upsert(
+                note.copy(
+                    syncState = SyncState.PENDING.name,
+                    updatedAt = now,
+                    version = note.version,
+                ),
+            )
+            pendingOpDao.insert(
+                PendingOpEntity(opType = "UPDATE", noteId = id, payload = null, createdAt = now),
+            )
+        }
+        syncScheduler.schedule()
+    }
+
+    override suspend fun resolveConflictKeepServer(id: String) {
+        val now = System.currentTimeMillis()
+        try {
+            val server = api.getNote(id)
+            db.withTransaction {
+                val note = noteDao.getById(id) ?: return@withTransaction
+                noteDao.upsert(
+                    note.copy(
+                        title = server.title,
+                        content = server.content,
+                        folderId = server.folderId,
+                        isPinned = server.isPinned,
+                        updatedAt = now,
+                        version = server.version,
+                        syncState = SyncState.SYNCED.name,
+                        syncedVersion = server.version,
+                    ),
+                )
+            }
+        } catch (e: Exception) {
+            // Leave conflict state; user can retry.
+        }
     }
 }

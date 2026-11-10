@@ -7,6 +7,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.inc.app.data.local.FolderDao
 import com.inc.app.data.local.IncSyncDatabase
 import com.inc.app.data.local.NoteDao
+import com.inc.app.data.local.NoteFtsDao
 import com.inc.app.data.local.PendingOpDao
 import dagger.Module
 import dagger.Provides
@@ -53,7 +54,7 @@ object RoomModule {
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): IncSyncDatabase =
         Room.databaseBuilder(context, IncSyncDatabase::class.java, "incsync.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .build()
 
     @Provides
@@ -65,9 +66,30 @@ object RoomModule {
     @Provides
     fun providePendingOpDao(db: IncSyncDatabase): PendingOpDao = db.pendingOpDao()
 
+    @Provides
+    fun provideNoteFtsDao(db: IncSyncDatabase): NoteFtsDao = db.noteFtsDao()
+
     val MIGRATION_2_3 = object : Migration(2, 3) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL("ALTER TABLE notes ADD COLUMN syncedVersion INTEGER NOT NULL DEFAULT 0")
+        }
+    }
+
+    val MIGRATION_3_4 = object : Migration(3, 4) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE folders ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+            db.execSQL("ALTER TABLE folders ADD COLUMN syncState TEXT NOT NULL DEFAULT 'PENDING'")
+            db.execSQL("ALTER TABLE folders ADD COLUMN syncedVersion INTEGER NOT NULL DEFAULT 0")
+        }
+    }
+
+    val MIGRATION_4_5 = object : Migration(4, 5) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts4(content='notes', title, content)")
+            db.execSQL("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')")
+            db.execSQL("CREATE TRIGGER IF NOT EXISTS notes_fts_insert AFTER INSERT ON notes BEGIN INSERT INTO notes_fts(docid, title, content) VALUES (new.rowid, new.title, new.content); END")
+            db.execSQL("CREATE TRIGGER IF NOT EXISTS notes_fts_delete AFTER DELETE ON notes BEGIN INSERT INTO notes_fts(notes_fts, docid, title, content) VALUES ('delete', old.rowid, old.title, old.content); END")
+            db.execSQL("CREATE TRIGGER IF NOT EXISTS notes_fts_update AFTER UPDATE ON notes BEGIN INSERT INTO notes_fts(notes_fts, docid, title, content) VALUES ('delete', old.rowid, old.title, old.content); INSERT INTO notes_fts(docid, title, content) VALUES (new.rowid, new.title, new.content); END")
         }
     }
 }
