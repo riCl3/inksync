@@ -1,6 +1,7 @@
 package com.inc.app.data.local
 
 import androidx.room.Dao
+import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
@@ -61,6 +62,15 @@ interface NoteDao {
 
     @Query("SELECT COUNT(*) FROM notes WHERE syncState != 'SYNCED' AND deletedAt IS NULL")
     suspend fun countUnsynced(): Int
+
+    @Query(
+        """
+        UPDATE notes
+        SET syncState = :syncState, version = :version, syncedVersion = :syncedVersion
+        WHERE id = :id
+        """,
+    )
+    suspend fun updateSyncState(id: String, syncState: String, version: Int, syncedVersion: Int): Int
 }
 
 @Dao
@@ -74,4 +84,23 @@ interface FolderDao {
 
     @Query("DELETE FROM folders WHERE id = :id")
     suspend fun delete(id: String)
+}
+
+@Dao
+interface PendingOpDao {
+
+    @Query("SELECT * FROM pending_ops ORDER BY createdAt ASC")
+    fun observeAll(): Flow<List<PendingOpEntity>>
+
+    @Query("SELECT * FROM pending_ops ORDER BY createdAt ASC")
+    suspend fun getAll(): List<PendingOpEntity>
+
+    @Insert
+    suspend fun insert(op: PendingOpEntity): Long
+
+    @Query("DELETE FROM pending_ops WHERE id = :id")
+    suspend fun delete(id: Long)
+
+    @Query("UPDATE pending_ops SET attempts = attempts + 1, lastError = :error WHERE id = :id")
+    suspend fun markFailed(id: Long, error: String?)
 }

@@ -11,6 +11,7 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
+import com.inc.app.ui.auth.AuthScreen
 import com.inc.app.ui.folders.FoldersScreen
 import com.inc.app.ui.notes.NoteEditorScreen
 import com.inc.app.ui.notes.NotesListScreen
@@ -59,6 +60,7 @@ fun IncSyncNavHost(
         composable(Routes.SETTINGS) {
             SettingsScreen(
                 onOpenSyncStatus = { navController.navigate(Routes.SYNC_STATUS) },
+                onOpenAuth = { navController.navigate(Routes.AUTH) },
             )
         }
         composable(
@@ -72,6 +74,12 @@ fun IncSyncNavHost(
         }
         composable(Routes.SYNC_STATUS) {
             SyncStatusScreen(onBack = { navController.popBackStack() })
+        }
+        composable(Routes.AUTH) {
+            AuthScreen(
+                onBack = { navController.popBackStack() },
+                onDone = { navController.popBackStack() },
+            )
         }
     }
 }

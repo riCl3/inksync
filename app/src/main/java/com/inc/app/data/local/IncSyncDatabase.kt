@@ -11,11 +11,12 @@ import androidx.room.RoomDatabase
  * migration tests replay those to prove upgrades don't destroy user data.
  */
 @Database(
-    entities = [NoteEntity::class, FolderEntity::class],
-    version = 1,
+    entities = [NoteEntity::class, FolderEntity::class, PendingOpEntity::class],
+    version = 3,
     exportSchema = true,
 )
 abstract class IncSyncDatabase : RoomDatabase() {
     abstract fun noteDao(): NoteDao
     abstract fun folderDao(): FolderDao
+    abstract fun pendingOpDao(): PendingOpDao
 }

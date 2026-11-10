@@ -37,6 +37,8 @@ data class NoteEntity(
     /** Stored as the enum's name — explicit mapping, no converter magic. */
     val syncState: String,
     val deletedAt: Long?,
+    /** Last version acknowledged by the server (0 = never synced). */
+    val syncedVersion: Int = 0,
 )
 
 @Entity(tableName = "folders")
@@ -75,6 +77,27 @@ fun Note.toEntity() = NoteEntity(
     version = version,
     syncState = syncState.name,
     deletedAt = deletedAt,
+)
+
+/**
+ * A queued synchronization operation.
+ *
+ * Every local write produces one of these in the SAME transaction as the
+ * note row change, so a process kill can never separate a note from its
+ * "needs to sync" marker. The WorkManager worker drains this table.
+ */
+@Entity(tableName = "pending_ops")
+data class PendingOpEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    /** CREATE / UPDATE / DELETE */
+    val opType: String,
+    val noteId: String,
+    /** JSON snapshot of the note to push (null for DELETE). */
+    val payload: String?,
+    val createdAt: Long,
+    val attempts: Int = 0,
+    val lastError: String? = null,
 )
 
 fun FolderEntity.toDomain() = Folder(

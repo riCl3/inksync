@@ -39,6 +39,7 @@ import com.inc.app.data.ThemeMode
 @Composable
 fun SettingsScreen(
     onOpenSyncStatus: () -> Unit,
+    onOpenAuth: () -> Unit,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
@@ -105,6 +106,28 @@ fun SettingsScreen(
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.outline,
                     modifier = Modifier.padding(start = 8.dp),
+                )
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 12.dp))
+
+            GroupLabel("Account")
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenAuth)
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Sign in / Register",
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.weight(1f),
+                )
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowForwardIos,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.outline,
                 )
             }
 

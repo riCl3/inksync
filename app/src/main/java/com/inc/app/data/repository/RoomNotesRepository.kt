@@ -3,6 +3,11 @@ package com.inc.app.data.repository
 import com.inc.app.data.local.FolderDao
 import com.inc.app.data.local.NoteDao
 import com.inc.app.data.local.NoteEntity
+import com.inc.app.data.local.IncSyncDatabase
+import com.inc.app.data.local.PendingOpDao
+import com.inc.app.data.local.PendingOpEntity
+import com.inc.app.data.remote.TokenStore
+import com.inc.app.data.sync.SyncScheduler
 import com.inc.app.data.local.toDomain
 import com.inc.app.domain.model.Folder
 import com.inc.app.domain.model.Note
@@ -11,6 +16,7 @@ import com.inc.app.domain.repository.NotesRepository
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import androidx.room.withTransaction
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -36,11 +42,14 @@ import kotlinx.coroutines.flow.map
 class RoomNotesRepository @Inject constructor(
     private val noteDao: NoteDao,
     private val folderDao: FolderDao,
+    private val pendingOpDao: PendingOpDao,
+    private val tokenStore: TokenStore,
+    private val db: IncSyncDatabase,
+    private val syncScheduler: SyncScheduler,
 ) : NotesRepository {
 
-    // Placeholder owner until authentication (Milestone 3) provides a real
-    // user id. Ownership checks become enforceable the moment this changes.
-    private val currentUserId = "local-user"
+    private val currentUserId: String
+        get() = tokenStore.userId.value ?: "local-user"
 
     override fun observeNotes(): Flow<List<Note>> =
         noteDao.observeVisible().map { entities -> entities.map { it.toDomain() } }
@@ -54,41 +63,60 @@ class RoomNotesRepository @Inject constructor(
     override suspend fun createNote(title: String, content: String, folderId: String?): String {
         val now = System.currentTimeMillis()
         val id = UUID.randomUUID().toString()
-        noteDao.upsert(
-            NoteEntity(
-                id = id,
-                userId = currentUserId,
-                title = title,
-                content = content,
-                folderId = folderId,
-                isPinned = false,
-                createdAt = now,
-                updatedAt = now,
-                version = 1,
-                syncState = SyncState.PENDING.name,
-                deletedAt = null,
-            ),
-        )
+        db.withTransaction {
+            noteDao.upsert(
+                NoteEntity(
+                    id = id,
+                    userId = currentUserId,
+                    title = title,
+                    content = content,
+                    folderId = folderId,
+                    isPinned = false,
+                    createdAt = now,
+                    updatedAt = now,
+                    version = 1,
+                    syncState = SyncState.PENDING.name,
+                    deletedAt = null,
+                ),
+            )
+            pendingOpDao.insert(
+                PendingOpEntity(opType = "CREATE", noteId = id, payload = null, createdAt = now),
+            )
+        }
+        syncScheduler.schedule()
         return id
     }
 
     override suspend fun updateNote(id: String, title: String, content: String) {
-        noteDao.updateContent(
-            id = id,
-            title = title,
-            content = content,
-            updatedAt = System.currentTimeMillis(),
-        )
+        val now = System.currentTimeMillis()
+        db.withTransaction {
+            noteDao.updateContent(id = id, title = title, content = content, updatedAt = now)
+            pendingOpDao.insert(
+                PendingOpEntity(opType = "UPDATE", noteId = id, payload = null, createdAt = now),
+            )
+        }
+        syncScheduler.schedule()
     }
 
     override suspend fun setPinned(id: String, pinned: Boolean) {
-        noteDao.setPinned(id = id, pinned = pinned, updatedAt = System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        db.withTransaction {
+            noteDao.setPinned(id = id, pinned = pinned, updatedAt = now)
+            pendingOpDao.insert(
+                PendingOpEntity(opType = "UPDATE", noteId = id, payload = null, createdAt = now),
+            )
+        }
+        syncScheduler.schedule()
     }
 
     override suspend fun deleteNote(id: String) {
-        // Hard delete until Milestone 5: without a sync queue there is nothing
-        // to reconcile against the server. Soft delete (deletedAt) flips on
-        // together with the DELETE sync operation.
-        noteDao.delete(id)
+        val now = System.currentTimeMillis()
+        db.withTransaction {
+            noteDao.delete(id)
+            pendingOpDao.insert(
+                PendingOpEntity(opType = "DELETE", noteId = id, payload = null, createdAt = now),
+            )
+        }
+        syncScheduler.schedule()
     }
 }

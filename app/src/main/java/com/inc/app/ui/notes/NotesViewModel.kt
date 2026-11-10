@@ -53,10 +53,11 @@ class NotesViewModel @Inject constructor(
             NotesUiState(
                 pinned = sorted.filter { it.isPinned },
                 notes = sorted.filterNot { it.isPinned },
-                syncStatus = if (notes.any { it.syncState != SyncState.SYNCED }) {
-                    SyncStatus.PENDING
-                } else {
-                    SyncStatus.SYNCED
+                syncStatus = when {
+                    notes.any { it.syncState == SyncState.CONFLICT } -> SyncStatus.CONFLICT
+                    notes.any { it.syncState == SyncState.FAILED } -> SyncStatus.FAILED
+                    notes.any { it.syncState != SyncState.SYNCED } -> SyncStatus.PENDING
+                    else -> SyncStatus.SYNCED
                 },
                 isLoading = false,
             )

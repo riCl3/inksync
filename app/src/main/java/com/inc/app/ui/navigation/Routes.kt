@@ -18,6 +18,7 @@ object Routes {
     const val SETTINGS = "settings"
     const val FOLDERS = "folders"
     const val SYNC_STATUS = "sync_status"
+    const val AUTH = "auth"
 
     const val NOTE_ARG = "noteId"
     const val EDITOR = "note/{$NOTE_ARG}"
