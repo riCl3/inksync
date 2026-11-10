@@ -21,12 +21,40 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    sourceSets {
+        getByName("androidTest") {
+            // Room exported schemas are packaged into androidTest assets so
+            // MigrationTestHelper can replay real released schemas.
+            assets.srcDirs(files("$projectDir/schemas"))
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            // Optional: provide via gradle.properties or env vars.
+            // RELEASE_STORE_FILE, RELEASE_STORE_PASSWORD,
+            // RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD
+            val storeFilePath = providers.gradleProperty("RELEASE_STORE_FILE").orNull
+                ?: System.getenv("RELEASE_STORE_FILE")
+            if (storeFilePath != null) {
+                storeFile = file(storeFilePath)
+                storePassword = providers.gradleProperty("RELEASE_STORE_PASSWORD").orNull
+                    ?: System.getenv("RELEASE_STORE_PASSWORD")
+                keyAlias = providers.gradleProperty("RELEASE_KEY_ALIAS").orNull
+                    ?: System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = providers.gradleProperty("RELEASE_KEY_PASSWORD").orNull
+                    ?: System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             // Signing is configured in Milestone 12; keep secrets out of Git.
             // API_BASE_URL must point at the HTTPS production deployment.
             buildConfigField("String", "API_BASE_URL", "\"https://api.example.com\"")
             manifestPlaceholders["usesCleartextTraffic"] = "false"
+            signingConfig = signingConfigs.getByName("release").storeFile?.let { signingConfigs.getByName("release") }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -114,6 +142,7 @@ dependencies {
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.room.testing)
+    androidTestImplementation(libs.androidx.work.testing)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
