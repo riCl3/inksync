@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "incsync"
+rootProject.name = "inksyc"
 include(":app")

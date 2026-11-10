@@ -19,7 +19,7 @@ def create_app() -> FastAPI:
         raise RuntimeError("JWT_SECRET must be set in production")
 
     application = FastAPI(
-        title="incsync API",
+        title="inksyc API",
         version="0.1.0",
         # Keep the interactive docs available outside production only.
         docs_url=None if settings.environment == "production" else "/docs",

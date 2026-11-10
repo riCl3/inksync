@@ -1,149 +1,407 @@
-# incsync
+# inksyc
 
-**Offline-first personal notes for Android, backed by a FastAPI service.** Notes are written to the
-device first; the local database is the single source of truth for everything the user sees, and
-synchronization with the backend happens independently behind the UI. The app never blocks on the
-network, never loses a keystroke to a flaky connection, and never shows a spinner just to read a
-note.
+**Offline-first personal notes for Android, backed by a FastAPI service.** The local Room database is the
+single source of truth for every screen; all writes are committed locally first and synchronized to
+the backend by a persistent WorkManager job. No read ever blocks on the network.
 
-> Status: **Complete** — offline-first notes, authentication, bidirectional sync, full-text search,
-> folders, conflict resolution, encrypted credential storage, failure-injection tests, and a
-> release-ready build are all implemented and verified.
+> Status: **Complete** — offline-first notes, JWT auth, bidirectional sync with optimistic
+> concurrency, FTS4 search, folders, conflict resolution, encrypted credential storage,
+> Room migrations v1→v5, failure-injection tests, and a release-ready (R8) build.
 
 ---
 
 ## Table of contents
 
-1. [Why offline-first](#why-offline-first)
-2. [Architecture](#architecture)
-3. [Feature set](#feature-set)
-4. [Project structure](#project-structure)
-5. [Backend service](#backend-service)
-6. [Data model](#data-model)
-7. [Synchronization protocol](#synchronization-protocol)
-8. [Build & run](#build--run)
-9. [Configuration](#configuration)
-10. [Testing](#testing)
-11. [Release build](#release-build)
-12. [Roadmap status](#roadmap-status)
-13. [Privacy & security](#privacy--security)
-14. [Contributing](#contributing)
-15. [License](#license)
+1. [Build & toolchain](#build--toolchain)
+2. [Module & package layout](#module--package-layout)
+3. [Architecture & invariants](#architecture--invariants)
+4. [Dependency injection graph](#dependency-injection-graph)
+5. [Data model & schema](#data-model--schema)
+6. [Room migrations](#room-migrations)
+7. [Synchronization engine](#synchronization-engine)
+8. [Authentication & token storage](#authentication--token-storage)
+9. [Full-text search](#full-text-search)
+10. [Conflict resolution](#conflict-resolution)
+11. [Adaptive UI & theming](#adaptive-ui--theming)
+12. [Build variants & configuration](#build-variants--configuration)
+13. [Release, R8 & ProGuard](#release-r8--proguard)
+14. [Testing strategy](#testing-strategy)
+15. [Observability & logging](#observability--logging)
+16. [Backend service](#backend-service)
+17. [Contributing](#contributing)
 
 ---
 
-## Why offline-first
+## Build & toolchain
 
-- **Local is the source of truth.** Every screen reads from Room through reactive `Flow`s; Compose
-  recomposes automatically when the underlying data changes.
-- **Writes are atomic.** A note change and its pending sync operation are persisted in a single
-  Room transaction, so a process kill can never separate a row from its "needs to sync" marker.
-- **Sync is persistent work.** WorkManager drains the pending-op queue with network constraints,
-  exponential backoff, and survives process death and device reboots.
-- **Failures are classified.** Transient errors (I/O, 5xx) retry with backoff; permanent errors
-  (4xx) are surfaced as `FAILED` / `CONFLICT` states in the UI instead of being retried forever.
-- **No blocking reads.** Opening, editing, searching, and deleting notes never touch the network.
+| Tool | Version | Notes |
+|---|---|---|
+| Android Gradle Plugin | 8.x | `compileSdk 35`, `minSdk 26`, `targetSdk 35` |
+| Kotlin | 2.x | Compose compiler plugin enabled |
+| JDK | 17 | Required by AGP |
+| Gradle | 8.x (wrapper) | Configuration cache enabled |
+| Room | 2.6.x | KSP (not kapt) for codegen |
+| Hilt | 2.51.x | `@HiltViewModel`, `@AndroidEntryPoint` |
+| WorkManager | 2.9.x | On-demand init via `Configuration.Provider` |
+| Compose BOM | 2024.x | Material 3 |
+| Retrofit | 2.11.x | OkHttp 4.12.x |
+| Coroutines / Flow | 1.8.x | `StateFlow`, `Flow` from DAOs |
+| Python (backend) | 3.11+ | FastAPI 0.115, SQLAlchemy 2.0, Pydantic v2 |
 
-## Architecture
+Commands:
 
-```
-Compose UI  ← StateFlow ←  ViewModel  ←  Repository  ←  Local data source (Room, source of truth)
-                                                  │              Remote data source (Retrofit)
-                                                  └→ pending sync ops → WorkManager
-```
-
-```mermaid
-flowchart TD
-    UI[Compose Screens] --> VM[ViewModel]
-    VM --> R[Repository]
-    R --> L[(Local DB - source of truth)]
-    R --> RM[Remote API]
-    L -.->|pending operations| W[Sync Worker]
-    W -->|idempotent upload| RM
-    W -->|retry / conflict detection| L
-    L -->|Flow| UI
+```bash
+./gradlew :app:assembleDebug            # debug APK
+./gradlew :app:installDebug             # install
+./gradlew :app:testDebugUnitTest        # JVM unit tests
+./gradlew :app:connectedDebugAndroidTest # instrumented (device/emulator)
+./gradlew :app:assembleRelease          # release APK (R8)
 ```
 
-**Rules of the architecture**
+## Module & package layout
 
-- UI renders immutable state; it never reaches into data sources directly.
-- Every local write goes through the repository in one atomic step (entity + pending sync op).
-- Synchronization is persistent work (WorkManager), not a coroutine — it survives process death.
-- Failures are classified: transient errors retry with backoff, permanent errors surface in the UI.
-- Domain models (`com.inc.app.domain`) carry no framework annotations; persistence and network
-  types are mapped at the repository boundary, keeping UI code free of Room/Retrofit details.
-
-### Key components
-
-| Layer | Responsibility |
-|---|---|
-| `domain` | Plain Kotlin models (`Note`, `Folder`, `SyncState`) and the `NotesRepository` interface. |
-| `data.local` | Room entities (`NoteEntity`, `FolderEntity`, `PendingOpEntity`, `NoteFtsEntity`), DAOs, database, migrations. |
-| `data.remote` | Retrofit `IncSyncApi`, serializable DTOs, `TokenStore` (encrypted). |
-| `data.repository` | `RoomNotesRepository` — the single implementation of `NotesRepository`; maps entity ↔ domain; records pending ops transactionally. |
-| `data.sync` | `SyncWorker` (drains the queue) and `SyncScheduler` (enqueues unique work). |
-| `di` | Hilt modules binding Room, network, and repository implementations. |
-| `ui` | Compose screens + ViewModels; consume `StateFlow<UiState>` only. |
-
-## Feature set
-
-- **Notes** — create, edit (write-through, no save button), pin, delete. Deletions are hard-deletes
-  locally but enqueue a `DELETE` sync op so the server is updated.
-- **Folders** — create, rename, delete; notes reference a `folderId`. Folder mutations are queued
-  and synced like notes.
-- **Offline search** — Room FTS4 full-text search over note titles and bodies, exposed as a
-  reactive `Flow`.
-- **Sync** — idempotent push of `CREATE` / `UPDATE` / `DELETE` with optimistic concurrency
-  (`base_version`), conflict detection on `409`, exponential-backoff retry, per-row `SyncState`.
-- **Auth** — register / login / logout against the FastAPI backend; bearer-token OkHttp
-  interceptor; encrypted token storage.
-- **Conflict resolution** — when a note diverges on the server, the editor offers "keep mine"
-  (overwrite server) or "use server version" (discard local).
-- **Adaptive UI** — bottom bar on phones, navigation rail on wide screens; Material 3 theme with
-  color reserved for sync state.
-- **Sync status** — app-wide chip aggregated from per-note states
-  (`SYNCED` / `PENDING` / `FAILED` / `CONFLICT` / `SYNCING` / `OFFLINE`).
-
-## Project structure
+Single Gradle module (`:app`) plus a separate Python backend (`server/`). Package root
+`com.inc.app`.
 
 ```
 app/src/main/java/com/inc/app/
-├── IncSyncApp.kt          # Hilt application + WorkManager configuration
-├── MainActivity.kt        # single activity, theme + adaptive root
-├── domain/                # models + repository interface (no framework deps)
+├── IncSyncApp.kt              # Application + WorkManager Configuration.Provider
+├── MainActivity.kt            # single Activity, edge-to-edge, theme
+├── domain/                    # framework-free models + repository interface
+│   ├── Note.kt, Folder.kt     # data classes, SyncState enum
+│   └── NotesRepository.kt     # interface; the only data contract for UI
 ├── data/
-│   ├── local/             # Room entities, DAOs, database, FTS
-│   ├── remote/            # Retrofit API, DTOs, TokenStore
-│   ├── repository/        # Room-backed repository (entity ↔ domain boundary)
-│   └── sync/              # SyncWorker, SyncScheduler
-├── di/                    # Hilt modules (data, network, Room)
+│   ├── local/
+│   │   ├── NoteEntity.kt, FolderEntity.kt, PendingOpEntity.kt, NoteFtsEntity.kt
+│   │   ├── *Dao.kt            # Room DAOs (suspend + Flow-returning)
+│   │   ├── IncSyncDatabase.kt # @Database(entities=..., version=5, exportSchema=true)
+│   │   └── Converters.kt      # SyncState ↔ String
+│   ├── remote/
+│   │   ├── IncSyncApi.kt      # Retrofit interface
+│   │   ├── dto/               # serializable request/response models
+│   │   ├── TokenStore.kt      # EncryptedSharedPreferences wrapper
+│   │   └── AuthInterceptor.kt # Bearer token injection
+│   ├── repository/
+│   │   ├── RoomNotesRepository.kt  # implements NotesRepository
+│   │   └── AuthRepository.kt
+│   └── sync/
+│       ├── SyncWorker.kt      # CoroutineWorker, drains pending_ops
+│       └── SyncScheduler.kt   # unique work enqueue helper
+├── di/
+│   ├── RoomModule.kt          # DB, DAOs, repository binding
+│   └── NetworkModule.kt       # OkHttp, Retrofit, API
 └── ui/
-    ├── navigation/        # routes + NavHost
-    ├── notes/             # home + editor
-    ├── search/            # FTS-backed search
-    ├── folders/           # folder CRUD
-    ├── settings/          # theme, account, about
-    ├── sync/              # sync status & history
-    ├── auth/              # login / register
-    ├── components/        # sync chip, empty states
-    └── theme/             # colors, type, shapes
-
-server/                    # FastAPI + SQLAlchemy backend
+    ├── IncSyncRoot.kt         # adaptive scaffold (bottom bar / nav rail)
+    ├── navigation/            # routes + NavHost
+    ├── notes/, search/, folders/, settings/, sync/, auth/
+    ├── components/            # SyncStatusChip, EmptyState
+    └── theme/                 # colors, type, shapes, Theme.kt
 ```
+
+`exportSchema = true` writes JSON schemas to `app/schemas/` (checked in) for migration testing.
+
+## Architecture & invariants
+
+**Invariants the codebase enforces (do not break):**
+
+1. **Local is the source of truth.** UI collects `Flow` from DAOs via ViewModels; no screen
+   awaits a network call to render.
+2. **Atomic writes.** Every repository mutation runs inside `db.withTransaction { }` and
+   persists both the entity change and a `pending_ops` row. A crash between them is impossible
+   because they share one transaction.
+3. **Sync is persistent work.** Enqueued via WorkManager with a `CONNECTED` constraint; survives
+   process death and reboot. Never fire-and-forget coroutines from the UI layer.
+4. **Classification of failures.** IOException / 5xx → `Result.retry()` (WorkManager backoff).
+   4xx → mark op `FAILED`/`CONFLICT`, remove from queue, surface in UI. 404 on DELETE → success.
+5. **Idempotent CREATE.** Client-generated UUIDs; server treats a repeat `POST` with an existing
+   id as a no-op success. This makes retries and multi-device safe.
+6. **Domain isolation.** `domain/` has zero Android/framework imports. Mapping happens at the
+   repository boundary (`NoteEntity.toDomain()`, `Note.toEntity()`).
+7. **No blocking reads.** `NoteDao.getAll()` returns `Flow<List<NoteEntity>>`; ViewModels use
+   `stateIn(WhileSubscribed(5000))`.
+
+**Threading.** DAO suspend functions run on Room's executor (IO dispatcher internally). ViewModels
+launch on `viewModelScope` (Main). `SyncWorker` is a `CoroutineWorker` (IO dispatcher). No
+manual `withContext(Dispatchers.IO)` is needed for DAO calls; repository methods are `suspend`.
+
+## Dependency injection graph
+
+```
+@Singleton
+├── IncSyncDatabase (Room.databaseBuilder, "incsync.db")
+│   ├── NoteDao, FolderDao, PendingOpDao, NoteFtsDao
+├── TokenStore (EncryptedSharedPreferences)
+├── OkHttpClient (AuthInterceptor + HttpLoggingInterceptor in debug)
+├── Retrofit (baseUrl from BuildConfig.API_BASE_URL)
+└── IncSyncApi (retrofit.create)
+
+@HiltViewModel
+├── NotesViewModel (NotesRepository, SyncScheduler)
+├── SearchViewModel (NoteFtsDao)
+├── FoldersViewModel (NotesRepository)
+├── AuthViewModel (AuthRepository)
+└── SettingsViewModel (TokenStore)
+
+Worker (HiltWorker, @AssistedInject)
+└── SyncWorker (IncSyncApi, IncSyncDatabase, TokenStore)
+```
+
+`SyncWorker` is created by Hilt's `HiltWorkerFactory` (registered in `IncSyncApp.getWorkManagerConfiguration()`).
+
+## Data model & schema
+
+### `notes`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | Client UUID (offline creation requires client-side id). |
+| `userId` | TEXT | Owner; `"local-user"` until authenticated. |
+| `title`, `content` | TEXT | |
+| `folderId` | TEXT NULL | FK-ish to `folders.id` (not enforced; sync ordering). |
+| `isPinned` | INTEGER | 0/1 |
+| `createdAt`, `updatedAt` | INTEGER | Epoch millis. |
+| `version` | INTEGER | Bumped on every accepted local/server edit. |
+| `syncState` | TEXT | `PENDING/SYNCED/SYNCING/FAILED/CONFLICT`. |
+| `deletedAt` | INTEGER NULL | Soft-delete until sync confirms. |
+| `syncedVersion` | INTEGER | Last server-acknowledged version (0 = never). |
+
+### `folders`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT PK | Client UUID. |
+| `userId` | TEXT | |
+| `name` | TEXT | |
+| `createdAt`, `updatedAt` | INTEGER | |
+| `version` | INTEGER | |
+| `syncState` | TEXT | |
+| `syncedVersion` | INTEGER | |
+
+### `pending_ops`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK AUTOINCREMENT | Queue ordering. |
+| `opType` | TEXT | `CREATE/UPDATE/DELETE/FOLDER_CREATE/FOLDER_RENAME/FOLDER_DELETE`. |
+| `noteId` | TEXT | Target resource id. |
+| `payload` | TEXT NULL | Reserved for JSON snapshots. |
+| `createdAt` | INTEGER | Enqueue time. |
+| `attempts` | INTEGER | Retry counter. |
+| `lastError` | TEXT NULL | Last failure message. |
+
+### `notes_fts` (FTS4, external content)
+
+Virtual table backed by `notes`; Room keeps it in sync via triggers. `MATCH` over `title`/`content`.
+
+### Indexes
+
+- `notes(userId)`, `notes(folderId)`, `notes(updatedAt)`, `notes(syncState)`.
+- `folders(userId)`.
+- `pending_ops(createdAt)`.
+
+## Room migrations
+
+`IncSyncDatabase` is at **version 5**. All migrations are explicit (no
+`fallbackToDestructiveMigration`). Schema JSON is exported to `app/schemas/` and replayed in
+`MigrationTest`.
+
+| Version | Change |
+|---|---|
+| 1 → 2 | Added `folders` table + `notes.folderId`. |
+| 2 → 3 | Added `pending_ops` queue. |
+| 3 → 4 | Added `syncState`, `version`, `syncedVersion` columns; backfilled defaults. |
+| 4 → 5 | Added `notes_fts` FTS4 table + triggers; rebuilt from existing rows. |
+
+AutoMigration is **not** used (manual `Migration` objects give control over data backfill).
+`MigrationTest` (instrumented) loads the real v4 schema from assets, runs `MIGRATION_4_5`,
+and asserts row counts + FTS queryability.
+
+## Synchronization engine
+
+### State machine (per note)
+
+```
+PENDING  --(2xx)--> SYNCED
+PENDING  --(409)--> CONFLICT
+PENDING  --(5xx/IO)--> PENDING (retry with backoff)
+FAILED   --(manual retry)--> PENDING
+CONFLICT --(keep mine / use server)--> PENDING (re-enqueued)
+```
+
+App-wide `SyncStatus` aggregation priority: `CONFLICT` > `FAILED` > `PENDING` > `SYNCING` >
+`SYNCED` > `OFFLINE`.
+
+### Algorithm (`SyncWorker.doWork()`)
+
+1. If unauthenticated → `Result.success()` (ops stay queued).
+2. Load all `pending_ops` ordered by `createdAt`.
+3. For each op:
+   - `CREATE` → `POST /notes`. 2xx → mark note `SYNCED`, store server version, delete op.
+     409 → mark `FAILED`. IOException/5xx → `return Result.retry()`.
+   - `UPDATE` → `PUT /notes/{id}` with `base_version = syncedVersion`. 2xx → `SYNCED`.
+     409 → mark `CONFLICT`, store server note, delete op (resolution re-enqueues).
+   - `DELETE` → `DELETE /notes/{id}`. 2xx or 404 → hard-delete row, delete op.
+   - Folder ops follow the same pattern against `/folders`.
+4. Return `Result.success()` when the queue drains.
+
+### Enqueue (`SyncScheduler.schedule()`)
+
+```kotlin
+workManager.enqueueUniqueWork(
+    "incsync-sync",
+    ExistingWorkPolicy.KEEP,
+    OneTimeWorkRequestBuilder<SyncWorker>()
+        .setConstraints(Constraints.Builder().setRequiredNetworkType(CONNECTED).build())
+        .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, SECONDS)
+        .build()
+)
+```
+
+`KEEP` policy avoids duplicate work when writes happen in bursts.
+
+### Idempotency & concurrency
+
+- Client-generated UUIDs make `CREATE` replay-safe.
+- `base_version` on `UPDATE` gives optimistic concurrency; server returns 409 with the current
+  server row, enabling three-way conflict resolution.
+- `syncedVersion` on the client records the last accepted server version so retries don't
+  clobber newer server state.
+
+## Authentication & token storage
+
+- `AuthRepository` calls `POST /auth/register` and `POST /auth/login`, stores the JWT via
+  `TokenStore`.
+- `TokenStore` wraps `EncryptedSharedPreferences` (AES-256-GCM data, AES-256-SIV keys) with a
+  master key from `MasterKey.Builder` (Android Keystore, `AES256_GCM`).
+- `AuthInterceptor` (OkHttp) injects `Authorization: Bearer <token>` when present.
+- Logout clears the encrypted store; `SyncWorker` no-ops when unauthenticated.
+- Debug builds log HTTP traffic via `HttpLoggingInterceptor` (body level); release builds do not.
+
+## Full-text search
+
+- `NoteFtsDao.search(query)` runs `SELECT … FROM notes JOIN notes_fts ON notes.rowid = notes_fts.rowid WHERE notes_fts MATCH :query`.
+- `SearchViewModel` debounces input (300 ms) and exposes `StateFlow<List<Note>>`.
+- FTS is rebuilt in the v4→v5 migration from existing rows.
+
+## Conflict resolution
+
+When `SyncWorker` receives 409 on `UPDATE`:
+- Note's `syncState` → `CONFLICT`.
+- Server's version of the note is persisted in a sidecar field (or fetched on demand via
+  `GET /notes/{id}`) and shown in the editor.
+- Editor offers two actions:
+  - **Keep mine** — re-enqueue `UPDATE` with `base_version = serverVersion` (overwrite).
+  - **Use server** — apply server content locally, mark `SYNCED`.
+- `SyncStatus` chip turns red while any note is in `CONFLICT`.
+
+## Adaptive UI & theming
+
+- `calculateWindowSizeClass` drives navigation: `Compact` → bottom bar; `Medium`/`Expanded` → nav rail.
+- Material 3 with a custom "ink on paper" palette; color is reserved for sync state
+  (green = synced, amber = pending, red = conflict/failed).
+- Dark theme via `values-night/themes.xml`.
+- Single `Activity`; navigation via Compose `NavHost` with typed routes.
+
+## Build variants & configuration
+
+| Config | Debug | Release |
+|---|---|---|
+| `API_BASE_URL` | `http://10.0.2.2:8000` | `https://api.example.com` |
+| `usesCleartextTraffic` | `true` | `false` |
+| `isMinifyEnabled` | `false` | `true` |
+| `isShrinkResources` | `false` | `true` |
+| `applicationIdSuffix` | `.debug` | — |
+
+Override `API_BASE_URL` in `app/build.gradle.kts` `buildConfigField` for staging.
+
+## Release, R8 & ProGuard
+
+- `proguard-rules.pro` keeps Kotlin serialization members and `com.inc.app.**` Companion/serializer.
+- `-dontwarn com.google.errorprone.annotations.**` (Tink references them at compile time only).
+- WorkManager on-demand init: manifest removes `androidx.startup.InitializationProvider`'s
+  `WorkManagerInitializer` meta-data via `tools:node="remove"`; `IncSyncApp` implements
+  `Configuration.Provider` returning a `Configuration` with `HiltWorkerFactory`.
+- Lint vital checks run during `assembleRelease`; the `RemoveWorkManagerInitializer` lint rule
+  is satisfied by the manifest removal above.
+
+## Testing strategy
+
+### Layers
+
+| Layer | Tooling | Location |
+|---|---|---|
+| Unit (JVM) | JUnit 4, Turbine, fake repository | `app/src/test` |
+| Instrumented | AndroidX Test, Room in-memory, WorkManager TestDriver | `app/src/androidTest` |
+| Backend | pytest, in-memory SQLite | `server/tests` |
+
+### Unit tests
+
+- `NotesViewModelTest` — status aggregation across `SYNCED/PENDING/FAILED/CONFLICT` with a
+  fake repository (no Room). Verifies `SyncStatus` priority ordering.
+
+### Instrumented tests
+
+- `RoomNotesRepositoryTest` — CRUD, version bumping, pending-op recording, DB reopen
+  durability (uses on-disk DB, cleaned in `@After`).
+- `NoteDaoTest` — DAO query correctness.
+- `MigrationTest` — loads real v4 schema from `androidTest` assets, runs `MIGRATION_4_5`,
+  asserts row preservation + FTS population + `MATCH` query.
+- `SyncWorkerTest` — failure injection: fakes `IncSyncApi` returning 500/200; asserts
+  `Result.retry()` vs `Result.success()` and queue drain. Uses `TestListenableWorkerBuilder`.
+
+### Backend tests
+
+12 pytest cases: auth (register/login/me), notes CRUD, folders, conflict detection (409 on
+stale `base_version`).
+
+### Schema exports & golden files
+
+`app/schemas/com.inc.app.data.local.IncSyncDatabase/{1..5}.json` are checked in and used by
+`MigrationTestHelper`. Regenerate via `./gradlew :app:exportSchemas` when bumping DB version.
+
+## Observability & logging
+
+- Debug: `HttpLoggingInterceptor` at `BODY` level; Room query logging via
+  `RoomDatabase.Builder.setQueryCallback`.
+- Release: no HTTP body logging; only `ERROR`-level logs.
+- `SyncWorker` records `lastError` on each failed op for diagnostics (surfaced in settings).
+- No PII (note content) is ever logged.
 
 ## Backend service
 
-FastAPI (Python 3.11+) with SQLAlchemy, JWT auth, and a SQLite/PostgreSQL store.
+FastAPI 0.115, SQLAlchemy 2.0 (async), Pydantic v2, JWT (python-jose), password hashing
+(passlib/bcrypt).
 
-### Run locally
+### Run
 
 ```bash
 cd server
-python -m venv .venv
-# Windows: .venv\Scripts\activate   |   macOS/Linux: source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 DATABASE_URL="sqlite:///./dev.db" uvicorn app.main:app --reload --port 8000
 ```
+
+### API surface
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/auth/register` | Create account, return JWT. |
+| `POST` | `/auth/login` | Authenticate, return JWT. |
+| `GET`  | `/auth/me` | Current user (Bearer). |
+| `GET`  | `/notes` | List notes for the authenticated user. |
+| `POST` | `/notes` | Create (client-supplied id; idempotent). |
+| `GET`  | `/notes/{id}` | Fetch one (used for conflict resolution). |
+| `PUT`  | `/notes/{id}` | Update with `base_version` optimistic concurrency. |
+| `DELETE` | `/notes/{id}` | Delete (idempotent; 404 → success). |
+| `GET/POST/PUT/DELETE` | `/folders[/{id}]` | Folder CRUD with versioning. |
+
+`PUT /notes/{id}` returns `409 Conflict` with the server's current note when `base_version`
+does not match.
+
+### Data store
+
+- Default: SQLite (dev). Production: PostgreSQL via `DATABASE_URL`.
+- `docker-compose.yml` spins up Postgres + the API for local integration testing.
 
 ### Test
 
@@ -152,222 +410,18 @@ cd server
 DATABASE_URL="sqlite:///:memory:" python -m pytest -q
 ```
 
-### API surface (selected)
-
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/auth/register` | Create account, return JWT. |
-| `POST` | `/auth/login` | Authenticate, return JWT. |
-| `GET`  | `/auth/me` | Current user. |
-| `GET`  | `/notes` | List notes. |
-| `POST` | `/notes` | Create note (client-supplied id, idempotent). |
-| `GET`  | `/notes/{id}` | Fetch one note (used for conflict resolution). |
-| `PUT`  | `/notes/{id}` | Update with `base_version` optimistic concurrency. |
-| `DELETE` | `/notes/{id}` | Delete (idempotent; 404 treated as success). |
-| `GET`/`POST`/`PUT`/`DELETE` | `/folders[/{id}]` | Folder CRUD with versioning. |
-
-`PUT /notes/{id}` returns `409 Conflict` with the server's current note when `base_version`
-does not match, enabling multi-device conflict detection.
-
-## Data model
-
-### `notes` table
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | TEXT (PK) | Client-generated UUID; offline creation requires this. |
-| `userId` | TEXT | Owner; `"local-user"` until authenticated. |
-| `title`, `content` | TEXT | Note body. |
-| `folderId` | TEXT (nullable) | Optional folder. |
-| `isPinned` | INTEGER | Boolean. |
-| `createdAt`, `updatedAt` | INTEGER | Epoch millis. |
-| `version` | INTEGER | Optimistic-concurrency token; bumped on every accepted edit. |
-| `syncState` | TEXT | `PENDING` / `SYNCED` / `SYNCING` / `FAILED` / `CONFLICT`. |
-| `deletedAt` | INTEGER (nullable) | Soft-delete marker; row retained until sync confirms. |
-| `syncedVersion` | INTEGER | Last version acknowledged by the server (0 = never synced). |
-
-### `folders` table
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | TEXT (PK) | Client-generated UUID. |
-| `userId` | TEXT | Owner. |
-| `name` | TEXT | Display name. |
-| `createdAt`, `updatedAt` | INTEGER | Epoch millis. |
-| `version` | INTEGER | Optimistic-concurrency token. |
-| `syncState` | TEXT | Sync state. |
-| `syncedVersion` | INTEGER | Last server-acknowledged version. |
-
-### `pending_ops` table
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | INTEGER (PK, autoincrement) | Queue ordering. |
-| `opType` | TEXT | `CREATE` / `UPDATE` / `DELETE` / `FOLDER_CREATE` / `FOLDER_RENAME` / `FOLDER_DELETE`. |
-| `noteId` | TEXT | Target resource id (note or folder). |
-| `payload` | TEXT (nullable) | Reserved for future JSON snapshots. |
-| `createdAt` | INTEGER | Enqueue time. |
-| `attempts` | INTEGER | Retry counter. |
-| `lastError` | TEXT (nullable) | Last failure message. |
-
-### `notes_fts` (FTS4, external content)
-
-Virtual table backed by `notes`; kept in sync via Room-generated triggers. Supports
-`MATCH` queries over `title` and `content`.
-
-## Synchronization protocol
-
-1. **Local write** — repository wraps the entity change + a `pending_ops` row in one
-   `db.withTransaction { }`, then calls `SyncScheduler.schedule()`.
-2. **Enqueue work** — `SyncScheduler` enqueues a unique `OneTimeWorkRequest` (`incsync-sync`)
-   with a `CONNECTED` network constraint (kept if already queued).
-3. **Drain** — `SyncWorker.doWork()` (coroutine worker) runs when connected:
-   - If unauthenticated, succeed quietly and leave ops queued.
-   - For each pending op (ordered by `createdAt`):
-     - `CREATE` → `POST /notes`; on 2xx mark `SYNCED` and store server version; on 409 mark
-       `FAILED`; on 5xx/IOException → `Result.retry()`.
-     - `UPDATE` → `PUT /notes/{id}` with `base_version = syncedVersion`; on 409 mark
-       `CONFLICT` (server version stored, local content preserved).
-     - `DELETE` → `DELETE /notes/{id}`; 404 treated as success.
-   - Folder ops follow the same pattern against `/folders`.
-4. **Retry classification** — I/O and 5xx return `Result.retry()` (WorkManager backoff);
-   4xx marks the op failed and removes it from the queue.
-5. **Status aggregation** — `NotesViewModel` maps per-note states to an app-wide
-   `SyncStatus` (`CONFLICT` > `FAILED` > `PENDING` > `SYNCED`).
-
-Idempotency: client-generated UUIDs make `CREATE` safe to replay; the server treats a repeat
-`POST` with an existing id as a no-op success.
-
-## Build & run
-
-### Prerequisites
-
-- JDK 17
-- Android SDK (compileSdk 35, minSdk 26)
-- Python 3.11+ and `pip` (for the backend)
-
-### Android
-
-```bash
-./gradlew :app:assembleDebug            # build debug APK
-./gradlew :app:installDebug             # install on connected device/emulator
-./gradlew :app:testDebugUnitTest        # JVM unit tests
-./gradlew :app:connectedDebugAndroidTest # instrumented tests (device/emulator required)
-```
-
-The debug build points at `http://10.0.2.2:8000` (host loopback from the emulator) and
-allows cleartext traffic for local development.
-
-### Backend
-
-See [Backend service](#backend-service).
-
-## Configuration
-
-| Key | Where | Default (debug) | Default (release) |
-|---|---|---|---|
-| `API_BASE_URL` | `app/build.gradle.kts` build config | `http://10.0.2.2:8000` | `https://api.example.com` |
-| `usesCleartextTraffic` | manifest placeholder | `true` | `false` |
-| `SECRET_KEY` (backend) | env var | — | required in production |
-
-### Optional release signing
-
-Provide via `gradle.properties` or environment variables:
-
-```
-RELEASE_STORE_FILE=/path/to/keystore.jks
-RELEASE_STORE_PASSWORD=...
-RELEASE_KEY_ALIAS=...
-RELEASE_KEY_PASSWORD=...
-```
-
-If unset, `assembleRelease` produces an unsigned APK (suitable for local verification only).
-
-## Testing
-
-### Android unit tests (JVM)
-
-```bash
-./gradlew :app:testDebugUnitTest
-```
-
-- `NotesViewModelTest` — status aggregation against a fake repository (5 cases).
-
-### Android instrumented tests (device/emulator)
-
-```bash
-./gradlew :app:connectedDebugAndroidTest
-```
-
-| Test | Coverage |
-|---|---|
-| `RoomNotesRepositoryTest` | CRUD, version bumping, pending-op recording, DB reopen durability. |
-| `NoteDaoTest` | DAO-level queries. |
-| `MigrationTest` | v4→v5 migration preserves rows and rebuilds FTS. |
-| `SyncWorkerTest` | Failure injection: 5xx → `Result.retry()`; 2xx → `Result.success()` + queue drain. |
-
-### Backend tests
-
-```bash
-cd server && DATABASE_URL="sqlite:///:memory:" python -m pytest -q
-```
-
-12 cases covering auth, notes, folders, and conflict detection.
-
-### Schema exports
-
-Room exports JSON schemas to `app/schemas/` (one per DB version). These are packaged into
-`androidTest` assets so `MigrationTestHelper` can replay real released schemas.
-
-## Release build
-
-```bash
-./gradlew :app:assembleRelease
-```
-
-Release builds enable R8/ProGuard (`isMinifyEnabled = true`, `isShrinkResources = true`) and
-ship with cleartext traffic disabled. Point `API_BASE_URL` at your HTTPS production deployment
-before shipping. An unsigned APK is produced unless signing credentials are configured (see
-[Configuration](#configuration)).
-
-## Roadmap status
-
-| Milestone | Scope | Status |
-|---|---|---|
-| 1 | Compose skeleton, adaptive shell, repository interface | ✅ |
-| 2 | Room as the local source of truth | ✅ |
-| 3 | Auth + FastAPI backend | ✅ |
-| 4–6 | Remote sync, offline write queue, WorkManager | ✅ |
-| 7–9 | Idempotency, retries, multi-device conflict detection & resolution | ✅ |
-| 10 | Search (FTS) + folders + polish | ✅ |
-| 11 | Testing & failure injection | ✅ |
-| 12 | Release build + Play Store preparation | ✅ (signing optional) |
-
-## Privacy & security
-
-- Note content is never logged, never sent to analytics, and never appears in crash reports.
-- Credentials are stored with `EncryptedSharedPreferences` (AES-256, Android Keystore-backed
-  master key).
-- Debug builds allow cleartext traffic for the local dev backend only; release builds
-  require HTTPS.
-- The backend uses JWT bearer tokens with a configurable secret (`SECRET_KEY`); replace the
-  default before deploying.
-- `allowBackup="false"` prevents note data from being extracted via Android backup.
-
 ## Contributing
 
-1. Fork the repository and create a feature branch from `main`.
-2. Keep changes focused; match existing Kotlin/Compose conventions and the repository's
-   transactional-write pattern.
-3. Add or update tests for any behavior change (unit for ViewModels, instrumented for Room/sync).
-4. Run before opening a PR:
+1. Fork and branch from `main`.
+2. Match conventions: transactional writes, `Flow`-based reads, no framework deps in `domain/`.
+3. Add/update tests for behavior changes.
+4. Run before PR:
    ```bash
    ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
    cd server && DATABASE_URL="sqlite:///:memory:" python -m pytest -q
    ```
-5. Open a pull request describing the change and its verification.
+5. Open a PR with a description and verification steps.
 
 ## License
 
-This project is provided as-is for educational and portfolio use. See repository owner for
-licensing terms.
+Provided as-is for educational and portfolio use. See repository owner for licensing terms.
